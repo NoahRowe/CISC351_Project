@@ -1,0 +1,176 @@
+---
+title: "CISC 351 Project"
+output: rmarkdown::github_document
+---
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+Read in datasets
+```{r}
+setwd('~/Desktop/CISC 351/CISC351 Final Project/CISC351 Project Datasets')
+library(readxl)
+basic_stats = read_excel('~/Desktop/CISC 351/CISC351 Final Project/CISC351 Project Datasets/NBA Players - Basic.xlsx')
+adv_stats = read_excel('~/Desktop/CISC 351/CISC351 Final Project/CISC351 Project Datasets/NBA Players - Advanced.xlsx')
+```
+
+Data cleaning - Compile datasets
+```{r}
+# Remove empty/unnecessary columns
+basic_sub = as.data.frame(basic_stats[, -c(1, 23, 28)])
+adv_sub = as.data.frame(adv_stats[, -c(2, 9, 19, 24, 32, 35)])
+
+# Rename columns in basic_sub for arrange() and filter()
+colnames(basic_sub)[1] = 'Year'
+colnames(basic_sub)[2] = 'Player'
+colnames(basic_sub)[3] = 'Salary'
+
+# Create consistent ordering for both datasets
+library(tidyverse)
+basic = filter(arrange(basic_sub, Year, Player), Year < 2016 & Year > 1989)
+adv = filter(arrange(adv_sub, year, player), year < 2016 & year > 1989)
+
+# Remove observations that split a player's season stats before and after a trade has occurred
+index = rep(TRUE, nrow(basic))
+for (i in 1:(nrow(basic) - 1)) {
+  if (basic$Year[i] == basic$Year[i + 1] &  basic$Player[i] == basic$Player[i + 1]) {
+    index[i + 1] = FALSE
+  }
+}
+basic2 = basic[index,]
+
+index2 = rep(TRUE, nrow(adv))
+for (i in 1:(nrow(adv) - 1)) {
+  if (adv$year[i] == adv$year[i + 1] &  adv$player[i] == adv$player[i + 1]) {
+    index2[i + 1] = FALSE
+  }
+}
+adv2 = adv[index2,]
+
+# Final observations with matching names
+basic2[-c(6764, 8726, 8730, 8745, 9644, 10028), ]
+adv2[-c(8604, 8786, 9046), ]
+```
+
+Data Cleaning - Remove recurrent columns and observations without recorded salary
+```{r}
+# Prune redundant covariates from basic data
+basic = basic2[-c(6764, 8726, 8730, 8745, 9644, 10028), c(1:5, 7:29, 32, 35, 38, 39, 42:44, 46:51)]
+
+# Prune redundant covariates from advanced data
+advanced = adv2[-c(8604, 8786, 9046), c(23, 31, 33, 35:37, 39, 85, 86, 88)]
+
+data = cbind(basic, advanced)  ## Join data sets
+data = data[!is.na(data$Salary),]  ## Remove observations without salary
+```
+
+Feature Engineering - Adjust points, rebounds, assists, blocks to per game metric and salary to percentage
+```{r}
+# Import salary cap data
+setwd('~/Desktop/CISC 351/CISC351 Final Project/CISC351 Project Datasets')
+salary_cap = read.csv('nba_salary_cap.csv')[, -3]
+
+# Convert salary feature to percentage of total salary cap and standardize remaining features
+for (i in 1:nrow(data)) {
+  data$Salary[i] = data$Salary[i] / salary_cap[salary_cap$Year == data$Year[i], 2]
+  data$PTS[i] = data$PTS[i] / data$G[i]
+  data$AST[i] = data$AST[i] / data$G[i]
+  data$STL[i] = data$STL[i] / data$G[i]
+  data$DRB[i] = data$DRB[i] / data$G[i]
+  data$ORB[i] = data$ORB[i] / data$G[i]
+  data$BLK[i] = data$BLK[i] / data$G[i]
+  data$TOV[i] = data$TOV[i] / data$G[i]
+  data$PF[i] = data$PF[i] / data$G[i]
+  data$MP[i] = data$MP[i] / data$G[i]
+  if (is.na(data$`3P%`[i])) {
+    data$`3P%`[i] = 0
+  }
+  if (is.na(data$`FT%`[i])) {
+    data$`FT%`[i] = 0
+  }
+}
+
+# Position as factor
+data$Pos = as.factor(data$Pos)
+
+# Remove observations with missing values
+na = rep(0, ncol(data))
+for (i in 1:ncol(data)) {
+  na[i] = sum(is.na(data[, i]))
+}
+data = na.omit(data)
+```
+
+Construct training and validation sets
+```{r}
+set.seed(1)
+train_index = sample(nrow(data), round(nrow(data) * 0.8))
+train = data[train_index, ]
+val = data[-train_index, ]
+```
+
+Build Model - Linear Regression
+```{r}
+# Basic model
+lm1 = lm(Salary ~ ., data = train[, -c(1, 2)])
+lm1_preds = predict(lm1, val[-c(1:3)])
+
+# Validation error
+mean((lm1_preds - val$Salary)^2)
+
+# Stepwise feature selection
+lm1_step = step(lm1)
+lm1_step_preds = predict(lm1_step, val[-c(1:3)])
+
+# Validation error
+mean((lm1_step_preds - val$Salary)^2)
+# Slight improvement
+
+# Elastic net regression
+library(caret)
+elastic1_cv = train(Salary ~ ., data = train[, 3:51],
+                method = 'glmnet',
+                trControl = trainControl('cv', number = 10),
+                tunelength = 10)
+
+elastic1_cv$bestTune
+elastic1_preds = predict(elastic1_cv, val[, 4:51])
+
+# Validation error
+mean((val[, 3] - elastic1_preds)^2)
+```
+
+Build Model - Boosted Tree Model
+```{r}
+library(xgboost)
+
+# Basic Model
+boosted1 = xgboost(data.matrix(train[, 4:51]), train[, 3], nrounds = 10)
+
+# Basic Model validation error
+boosted1_preds = predict(boosted1, data.matrix(val[, 4:51]))
+mean((val[, 3] - boosted1_preds)^2)
+
+# Tune model
+library(caret)
+ctrl = trainControl(method = 'cv', number = 10)  ## 10-fold CV
+parameter_grid = expand.grid(nrounds = c(10, 20, 50, seq(100, 1000, 50)),
+                         max_depth = 2:5,
+                         eta = c(0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4),
+                         gamma = 0,
+                         colsample_bytree = 1,
+                         min_child_weight = 1,
+                         subsample = 1)
+
+boosted1_cv = train(Salary ~ ., data = train[, 3:51],
+                 trControl = ctrl,
+                 tuneGrid = parameter_grid,
+                 method = 'xgbTree')
+
+boosted1_cv_preds = predict(boosted1_cv, val[, 4:51])
+mean((val[, 3] - boosted1_cv_preds)^2)
+# Best results
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+
